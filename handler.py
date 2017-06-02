@@ -3,7 +3,7 @@ Main handler for all the incoming bot events
 '''
 import logging
 import telegram
-from telegram.ext import Updater, MessageHandler, CommandHandler
+from telegram.ext import Updater, MessageHandler, CommandHandler, Filters
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 
@@ -98,6 +98,27 @@ def contact_handler(bot, update):
     '''
     Handler for the messages with contacts
     '''
+    username = str(update['message']['chat']['id'])
+    if  not update['message']['contact']['user_id']:
+        bot.send_message(username, RESPONSES['empty_contact'])
+        return
+
+    adding_username = str(update['message']['contact']['user_id'])
+    item = table.get_item(Key={'username': username})['Item']
+    new_follow = set([adding_username]) - set(item['follow']) - set([username]) 
+    new_item = table.update_item(
+        Key={
+            'username': username
+        },
+        UpdateExpression='SET follow = list_append(follow, :val1)',
+        ExpressionAttributeValues={
+            ':val1': list(new_follow),
+        },
+        ReturnValues="UPDATED_NEW"
+    )
+    update_users_followers(username, set(new_follow), remove=False)
+    update_user_real_follow_count(username)
+
     logger.info(update)
     logger.info('contact_handler')
     pass
@@ -110,7 +131,7 @@ def start_command_handler(bot, update):
     '''
 
     # Avoid duplication of the existing users
-    username = str(update['message']['chat']['username'] or update['message']['chat']['id'])
+    username = str(update['message']['chat']['id'])
     if table.get_item(Key={'username': username}).get('Item', False):
         return 
 
@@ -120,7 +141,9 @@ def start_command_handler(bot, update):
     table.put_item(
         Item={
                 'username': username,
-                'user_id': update['message']['chat']['id'],
+                'first_name':  update['message']['from']['first_name'],
+                'last_name':  update['message']['from']['last_name'],
+                'user_id': username,
                 'follow': [],
                 'real_follow_count': 0,
                 'followers': [x['username'] for x in followers['Items']],
@@ -139,7 +162,7 @@ def add_command_handler(bot, update):
     users = list(map(lambda x: x[1:] if x.startswith('@') else x, 
                      update['message']['text'][len('/add'):].split()))
     chat_id = update['message']['chat']['id']
-    username = str(update['message']['chat']['username'] or update['message']['chat']['id'])
+    username = str(update['message']['chat']['id'])
     if not users:
         bot.send_message(chat_id, RESPONSES['empty_add_command'])
         return
@@ -170,7 +193,7 @@ def remove_command_handler(bot, update):
     users = list(map(lambda x: x[1:] if x.startswith('@') else x, 
                      update['message']['text'][len('/remove'):].split()))
     chat_id = update['message']['chat']['id']
-    username = update['message']['chat']['username']
+    username = str(update['message']['chat']['id'])
     if not users:
         bot.send_message(chat_id, RESPONSES['empty_remove_command'])
         return
@@ -204,7 +227,7 @@ def send_command_handler(bot, update):
         bot.send_message(chat_id, RESPONSES['empty_send_command'])
         return 
 
-    username = str(update['message']['chat']['username'] or update['message']['chat']['id'])
+    username = str(update['message']['chat']['id'])
 
     users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
     for user in users_to_send:
@@ -228,6 +251,7 @@ def lambda_handler(event, context):
     dp.add_handler(CommandHandler('add', add_command_handler))
     dp.add_handler(CommandHandler('send', send_command_handler))
     dp.add_handler(CommandHandler('remove', remove_command_handler))
+    dp.add_handler(MessageHandler(Filters.contact, contact_handler))
 
     dp.process_update(telegram.Update.de_json(event, bot))
 
@@ -246,6 +270,7 @@ def main():
     dp.add_handler(CommandHandler('add', add_command_handler))
     dp.add_handler(CommandHandler('send', send_command_handler))
     dp.add_handler(CommandHandler('remove', remove_command_handler))
+    dp.add_handler(MessageHandler(Filters.contact, contact_handler))
 
     # Start the Bot
     updater.start_polling()
