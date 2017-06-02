@@ -104,3 +104,8 @@ ENV/
 # config files
 config.py
 serverless.yml
+__pycache__/
+.requirements/
+.services/
+.serverless/
+node_modules/

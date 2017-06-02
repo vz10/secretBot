@@ -3,7 +3,7 @@ Main handler for all the incoming bot events
 '''
 import logging
 import telegram
-from telegram.ext import Updater, MessageHandler
+from telegram.ext import Updater, MessageHandler, CommandHandler
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 
@@ -14,13 +14,14 @@ from consts import RESPONSES, COMMANDS
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # Create a connection to the database
-dynamodb = boto3.resource('dynamodb', endpoint_url=config.DB_HOST)
-table = dynamodb.Table('users')
+dynamodb = boto3.resource('dynamodb', region_name=config.DB_REGION)
+table = dynamodb.Table(config.DB_NAME)
 
-# Create a bot instance for answering to the user
-bot = telegram.Bot(config.BOT_TOKEN)
+# # Create a bot instance for answering to the user
+# bot = telegram.Bot(config.BOT_TOKEN)
 
 
 def update_user_real_follow_count(username, follow=None):
@@ -40,7 +41,6 @@ def update_user_real_follow_count(username, follow=None):
             ':val1': new_real_follow_count,
         },
     )
-    logger.info('='*20+ ' %i' % (new_real_follow_count))
 
 
 def increase_users_real_follow_count(username):
@@ -85,7 +85,7 @@ def update_users_followers(username, following, remove=False):
         )
 
 
-def message_handler(update):
+def message_handler(bot, update):
     '''
     Handler for the text messages
     '''
@@ -94,7 +94,7 @@ def message_handler(update):
     pass
 
 
-def contact_handler(update):
+def contact_handler(bot, update):
     '''
     Handler for the messages with contacts
     '''
@@ -103,7 +103,7 @@ def contact_handler(update):
     pass
 
 
-def start_command_handler(update):
+def start_command_handler(bot, update):
     '''
     Handler for the "start" command.
     Add current user to the Users table
@@ -131,7 +131,7 @@ def start_command_handler(update):
     logger.info('start_command_handler')
 
 
-def add_command_handler(update):
+def add_command_handler(bot, update):
     '''
     Handler for the "add" commands
     Add new user(s) to the current user following list
@@ -159,12 +159,10 @@ def add_command_handler(update):
     update_users_followers(username, set(new_follow), remove=False)
     update_user_real_follow_count(username)
 
-    logger.info('*'*80)
-    logger.info(new_item)
     logger.info('add_command_handler')
 
 
-def remove_command_handler(update):
+def remove_command_handler(bot, update):
     '''
     Handler for the "remove" commands
     Remove user(s) from the current user following list
@@ -195,12 +193,17 @@ def remove_command_handler(update):
     logger.info('remove_command_handler')
 
 
-def send_command_handler(update):
+def send_command_handler(bot, update):
     '''
     Handler for the "send" command
     Send message to all the followers who has more that 10 real_following
     '''
     message = update['message']['text'][len('/send'):]
+    if not message:
+        chat_id = update['message']['chat']['id']
+        bot.send_message(chat_id, RESPONSES['empty_send_command'])
+        return 
+
     username = str(update['message']['chat']['username'] or update['message']['chat']['id'])
 
     users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
@@ -208,23 +211,25 @@ def send_command_handler(update):
         bot.send_message(int(user['user_id']), f'Somebody told me, that "{message}"')
     logger.info('send_command_handler')
 
-    
-def dispatcher(_, update):
-    if update['message']['contact']:
-        contact_handler(update)
-    else:
-        for command in COMMANDS:
-            if update['message']['text'].startswith(f'/{command}'):
-                globals()[f'{command}_command_handler'](update)
-                break
-        else:
-            message_handler(update)
-
 
 def echo(bot, update):
     logger.info(update)
     update.message.reply_text(update.message.text)
 
+
+def lambda_handler(event, context):
+    logger.info(f'UPDATE {event}')
+    updater = Updater(config.BOT_TOKEN)
+    bot = telegram.Bot(config.BOT_TOKEN)
+
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler('start', start_command_handler))
+    dp.add_handler(CommandHandler('add', add_command_handler))
+    dp.add_handler(CommandHandler('send', send_command_handler))
+    dp.add_handler(CommandHandler('remove', remove_command_handler))
+
+    dp.process_update(telegram.Update.de_json(event, bot))
 
 
 def main():
@@ -235,7 +240,12 @@ def main():
     dp = updater.dispatcher
 
     # on noncommand i.e message - echo the message on Telegram
-    dp.add_handler(MessageHandler(None, dispatcher))
+    # dp.add_handler(MessageHandler(None, dispatcher))
+
+    dp.add_handler(CommandHandler('start', start_command_handler))
+    dp.add_handler(CommandHandler('add', add_command_handler))
+    dp.add_handler(CommandHandler('send', send_command_handler))
+    dp.add_handler(CommandHandler('remove', remove_command_handler))
 
     # Start the Bot
     updater.start_polling()
