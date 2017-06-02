@@ -4,6 +4,8 @@ Main handler for all the incoming bot events
 import logging
 import telegram
 from telegram.ext import Updater, MessageHandler, CommandHandler, Filters
+from telegram.ext.inlinequeryhandler import InlineQueryHandler
+from telegram.ext.choseninlineresulthandler import ChosenInlineResultHandler
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 
@@ -18,6 +20,8 @@ logger.setLevel(logging.INFO)
 
 # Create a connection to the database
 dynamodb = boto3.resource('dynamodb', region_name=config.DB_REGION)
+# dynamodb = boto3.resource('dynamodb', endpoint_url=config.DB_HOST)
+
 table = dynamodb.Table(config.DB_NAME)
 
 # # Create a bot instance for answering to the user
@@ -85,6 +89,24 @@ def update_users_followers(username, following, remove=False):
         )
 
 
+def follow_user(username, user_id):
+    item = table.get_item(Key={'username': username})['Item']
+    new_follow = set([user_id]) - set(item['follow']) - set([username]) 
+    new_item = table.update_item(
+        Key={
+            'username': username
+        },
+        UpdateExpression='SET follow = list_append(follow, :val1)',
+        ExpressionAttributeValues={
+            ':val1': list(new_follow),
+        },
+        ReturnValues="UPDATED_NEW"
+    )
+    update_users_followers(username, set(new_follow), remove=False)
+    update_user_real_follow_count(username)
+
+
+
 def message_handler(bot, update):
     '''
     Handler for the text messages
@@ -102,26 +124,8 @@ def contact_handler(bot, update):
     if  not update['message']['contact']['user_id']:
         bot.send_message(username, RESPONSES['empty_contact'])
         return
-
-    adding_username = str(update['message']['contact']['user_id'])
-    item = table.get_item(Key={'username': username})['Item']
-    new_follow = set([adding_username]) - set(item['follow']) - set([username]) 
-    new_item = table.update_item(
-        Key={
-            'username': username
-        },
-        UpdateExpression='SET follow = list_append(follow, :val1)',
-        ExpressionAttributeValues={
-            ':val1': list(new_follow),
-        },
-        ReturnValues="UPDATED_NEW"
-    )
-    update_users_followers(username, set(new_follow), remove=False)
-    update_user_real_follow_count(username)
-
-    logger.info(update)
-    logger.info('contact_handler')
-    pass
+    
+    follow_user(username, str(update['message']['contact']['user_id']))
 
 
 def start_command_handler(bot, update):
@@ -141,8 +145,8 @@ def start_command_handler(bot, update):
     table.put_item(
         Item={
                 'username': username,
-                'first_name':  update['message']['from']['first_name'],
-                'last_name':  update['message']['from']['last_name'],
+                'first_name':  update.message.from_user.first_name.upper(),
+                'last_name':  update.message.from_user.last_name.upper(),
                 'user_id': username,
                 'follow': [],
                 'real_follow_count': 0,
@@ -235,13 +239,63 @@ def send_command_handler(bot, update):
     logger.info('send_command_handler')
 
 
+def photo_handler(bot, update):
+    '''
+    Handler for the photo messages
+    Send message with photo to all the followers who has more that 10 real_following
+    '''
+    photo = update['message']['photo']
+    username = str(update['message']['chat']['id'])
+
+    users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
+    for user in users_to_send:
+        bot.send_photo(int(user['user_id']), photo=photo[-1]['file_id'], caption='Somebody has just shown me that')
+    logger.info('send_photo_handler')
+
+
+def document_handler(bot, update):
+    '''
+    Handler for the docume t messages
+    Send message with photo to all the followers who has more that 10 real_following
+    '''
+    document = update['message']['document']
+    username = str(update['message']['chat']['id'])
+
+    users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
+    for user in users_to_send:
+        bot.send_document(int(user['user_id']), document=document['file_id'])
+    logger.info('send_document_handler')
+
+
+def inline_query_handler(bot, update):
+    query = update.inline_query.query
+    inline_query_id = update.inline_query.id
+
+    if len(query) < 3:
+        bot.answerInlineQuery(inline_query_id, [])
+        return
+
+    query_result = table.scan(FilterExpression=Attr('first_name').contains(query.upper()) | Attr('last_name').contains(query.upper()))['Items']
+    query_articles = list(map(lambda x: telegram.InlineQueryResultArticle(x['username'], 
+                                                                          '%s %s' % (x['first_name'] or '', x['last_name'] or ''),
+                                                                          telegram.InputTextMessageContent('%s %s' % (x['first_name'], x['last_name']))),
+                                                                          query_result))
+    bot.answerInlineQuery(inline_query_id, query_articles)
+
+
+def inline_query_result_handler(bot, update):
+    logger.info("QUERY RESULT UPDATE %s %s" % (str(update.chosen_inline_result.from_user.id), str(update.chosen_inline_result.result_id)))
+    follow_user(str(update.chosen_inline_result.from_user.id), str(update.chosen_inline_result.result_id))
+    logger.info('Query result handler')
+
+
 def echo(bot, update):
     logger.info(update)
     update.message.reply_text(update.message.text)
 
 
 def lambda_handler(event, context):
-    logger.info(f'UPDATE {event}')
+    logger.info(f'HANDLER UPDATE {event} {context}')
     updater = Updater(config.BOT_TOKEN)
     bot = telegram.Bot(config.BOT_TOKEN)
 
@@ -278,6 +332,10 @@ def register_handlers(dp):
     dp.add_handler(CommandHandler('send', send_command_handler))
     dp.add_handler(CommandHandler('remove', remove_command_handler))
     dp.add_handler(MessageHandler(Filters.contact, contact_handler))
+    dp.add_handler(MessageHandler(Filters.photo, photo_handler))
+    dp.add_handler(MessageHandler(Filters.document, document_handler))
+    dp.add_handler(InlineQueryHandler(inline_query_handler))
+    dp.add_handler(ChosenInlineResultHandler(inline_query_result_handler))
 
 
 if __name__ == '__main__':
