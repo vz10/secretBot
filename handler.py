@@ -246,12 +246,7 @@ def lambda_handler(event, context):
     bot = telegram.Bot(config.BOT_TOKEN)
 
     dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler('start', start_command_handler))
-    dp.add_handler(CommandHandler('add', add_command_handler))
-    dp.add_handler(CommandHandler('send', send_command_handler))
-    dp.add_handler(CommandHandler('remove', remove_command_handler))
-    dp.add_handler(MessageHandler(Filters.contact, contact_handler))
+    register_handlers(dp)
 
     dp.process_update(telegram.Update.de_json(event, bot))
 
@@ -266,11 +261,7 @@ def main():
     # on noncommand i.e message - echo the message on Telegram
     # dp.add_handler(MessageHandler(None, dispatcher))
 
-    dp.add_handler(CommandHandler('start', start_command_handler))
-    dp.add_handler(CommandHandler('add', add_command_handler))
-    dp.add_handler(CommandHandler('send', send_command_handler))
-    dp.add_handler(CommandHandler('remove', remove_command_handler))
-    dp.add_handler(MessageHandler(Filters.contact, contact_handler))
+    register_handlers(dp)
 
     # Start the Bot
     updater.start_polling()
@@ -279,6 +270,14 @@ def main():
     # SIGTERM or SIGABRT. This should be used most of the time, since
     # start_polling() is non-blocking and will stop the bot gracefully.
     updater.idle()
+
+
+def register_handlers(dp):
+    dp.add_handler(CommandHandler('start', start_command_handler))
+    dp.add_handler(CommandHandler('add', add_command_handler))
+    dp.add_handler(CommandHandler('send', send_command_handler))
+    dp.add_handler(CommandHandler('remove', remove_command_handler))
+    dp.add_handler(MessageHandler(Filters.contact, contact_handler))
 
 
 if __name__ == '__main__':
