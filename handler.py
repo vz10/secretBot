@@ -2,6 +2,8 @@
 Main handler for all the incoming bot events
 '''
 import logging
+from concurrent.futures import ThreadPoolExecutor
+
 import telegram
 from telegram.ext import Updater, MessageHandler, CommandHandler, Filters
 from telegram.ext.inlinequeryhandler import InlineQueryHandler
@@ -11,7 +13,7 @@ from boto3.dynamodb.conditions import Key, Attr
 
 import config
 from consts import RESPONSES, COMMANDS
-
+from db_actions import update_users_followers, follow_user, create_user, update_user_photo
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -23,88 +25,6 @@ dynamodb = boto3.resource('dynamodb', region_name=config.DB_REGION)
 # dynamodb = boto3.resource('dynamodb', endpoint_url=config.DB_HOST)
 
 table = dynamodb.Table(config.DB_NAME)
-
-# # Create a bot instance for answering to the user
-# bot = telegram.Bot(config.BOT_TOKEN)
-
-
-def update_user_real_follow_count(username, follow=None):
-    '''
-    Update %username% real_follow_count after user add/remove
-    somebody from their follow list
-    '''
-    if not follow:
-        follow = table.get_item(Key={'username': username})['Item']['follow']
-    new_real_follow_count = table.scan(FilterExpression=Attr('username').is_in(follow))['Count']
-    table.update_item(
-        Key={
-            'username': username
-        },
-        UpdateExpression='SET real_follow_count = :val1',
-        ExpressionAttributeValues={
-            ':val1': new_real_follow_count,
-        },
-    )
-
-
-def increase_users_real_follow_count(username):
-    '''
-    Find all the users that already have followed the new user 
-    and increase their "real_follow_count" amount
-    '''
-    users_to_update = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
-    for user in users_to_update:
-        table.update_item(
-            Key={'username': user['username']},
-            UpdateExpression='SET real_follow_count = real_follow_count + :val1',
-            ExpressionAttributeValues={
-            ':val1': 1,
-            },
-        )
-
-
-def update_users_followers(username, following, remove=False):
-    '''
-    Find all the users that %username% follows and 
-    update their "followers" list and "followers_count" amount
-    '''
-
-    for user in following:
-        item = table.get_item(Key={'username': user}).get('Item', False)
-        if item:
-            try: 
-                item['followers'].remove(username) if remove else item['followers'].append(username)
-            except ValueError:
-                continue
-        else:
-            continue 
-        table.update_item(
-            Key={
-                'username': user
-            },
-            UpdateExpression='SET followers = :val1',
-            ExpressionAttributeValues={
-                ':val1': item['followers'],
-            },
-        )
-
-
-def follow_user(username, user_id):
-    item = table.get_item(Key={'username': username})['Item']
-    new_follow = set([user_id]) - set(item['follow']) - set([username]) 
-    new_item = table.update_item(
-        Key={
-            'username': username
-        },
-        UpdateExpression='SET follow = list_append(follow, :val1)',
-        ExpressionAttributeValues={
-            ':val1': list(new_follow),
-        },
-        ReturnValues="UPDATED_NEW"
-    )
-    update_users_followers(username, set(new_follow), remove=False)
-    update_user_real_follow_count(username)
-
 
 
 def message_handler(bot, update):
@@ -136,57 +56,45 @@ def start_command_handler(bot, update):
 
     # Avoid duplication of the existing users
     username = str(update['message']['chat']['id'])
-    if table.get_item(Key={'username': username}).get('Item', False):
-        return 
+    # if table.get_item(Key={'username': username}).get('Item', False):
+    #     return 
+    create_user(update, table)
 
-    followers = table.scan(
-        FilterExpression=Attr('follow').contains(update['message']['chat']['username'])  
-    )
-    table.put_item(
-        Item={
-                'username': username,
-                'first_name':  update.message.from_user.first_name.upper(),
-                'last_name':  update.message.from_user.last_name.upper(),
-                'user_id': username,
-                'follow': [],
-                'real_follow_count': 0,
-                'followers': [x['username'] for x in followers['Items']],
-                'followers_count': followers['Count']
-            }
-        )
-    increase_users_real_follow_count(update['message']['chat']['username'])
+    photo = bot.getUserProfilePhotos(update.message.from_user.id)['photos'][0]
+    update_user_photo(photo, username, table)
+
     logger.info('start_command_handler')
 
 
-def add_command_handler(bot, update):
-    '''
-    Handler for the "add" commands
-    Add new user(s) to the current user following list
-    '''
-    users = list(map(lambda x: x[1:] if x.startswith('@') else x, 
-                     update['message']['text'][len('/add'):].split()))
-    chat_id = update['message']['chat']['id']
-    username = str(update['message']['chat']['id'])
-    if not users:
-        bot.send_message(chat_id, RESPONSES['empty_add_command'])
-        return
+# def add_command_handler(bot, update):
+#     '''
+#     Handler for the "add" commands
+#     Add new user(s) to the current user following list
+#     '''
+#     users = list(map(lambda x: x[1:] if x.startswith('@') else x, 
+#                      update['message']['text'][len('/add'):].split()))
+#     chat_id = update['message']['chat']['id']
+#     username = str(update['message']['chat']['id'])
+#     if not users:
+#         bot.send_message(chat_id, RESPONSES['empty_add_command'])
+#         return
 
-    item = table.get_item(Key={'username': username})['Item']
-    new_follow = set(users) - set(item['follow']) - set([username]) 
-    new_item = table.update_item(
-        Key={
-            'username': username
-        },
-        UpdateExpression='SET follow = list_append(follow, :val1)',
-        ExpressionAttributeValues={
-            ':val1': list(new_follow),
-        },
-        ReturnValues="UPDATED_NEW"
-    )
-    update_users_followers(username, set(new_follow), remove=False)
-    update_user_real_follow_count(username)
+#     item = table.get_item(Key={'username': username})['Item']
+#     new_follow = set(users) - set(item['follow']) - set([username]) 
+#     new_item = table.update_item(
+#         Key={
+#             'username': username
+#         },
+#         UpdateExpression='SET follow = list_append(follow, :val1)',
+#         ExpressionAttributeValues={
+#             ':val1': list(new_follow),
+#         },
+#         ReturnValues="UPDATED_NEW"
+#     )
+#     update_users_followers(username, set(new_follow), remove=False)
+#     # update_user_real_follow_count(username)
 
-    logger.info('add_command_handler')
+#     logger.info('add_command_handler')
 
 
 def remove_command_handler(bot, update):
@@ -214,8 +122,8 @@ def remove_command_handler(bot, update):
         }
     )
 
-    update_users_followers(username, set(users), remove=True)
-    update_user_real_follow_count(username, follow=new_follow)
+    update_users_followers(username, set(users), table, remove=True)
+    # update_user_real_follow_count(username, follow=new_follow)
 
     logger.info('remove_command_handler')
 
@@ -234,8 +142,13 @@ def send_command_handler(bot, update):
     username = str(update['message']['chat']['id'])
 
     users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
-    for user in users_to_send:
-        bot.send_message(int(user['user_id']), f'Somebody told me, that "{message}"')
+    message_to_send = f'Somebody told me, that "{message}"'
+    with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
+        list(Executor.map(lambda x: bot.send_message(*x), 
+                          [(int(user['username']), message_to_send) 
+                           for user in users_to_send]))
+    # for user in users_to_send:
+        # bot.send_message(int(user['username']), f'Somebody told me, that "{message}"')
     logger.info('send_command_handler')
 
 
@@ -248,8 +161,12 @@ def photo_handler(bot, update):
     username = str(update['message']['chat']['id'])
 
     users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
-    for user in users_to_send:
-        bot.send_photo(int(user['user_id']), photo=photo[-1]['file_id'], caption='Somebody has just shown me that')
+    photo_to_send = photo[-1]['file_id']
+    caption='Somebody has just shown me that'
+    with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
+        list(Executor.map(lambda x: bot.send_photo(*x), 
+                          [(int(user['username']), photo_to_send, caption) 
+                           for user in users_to_send]))
     logger.info('send_photo_handler')
 
 
@@ -262,8 +179,11 @@ def document_handler(bot, update):
     username = str(update['message']['chat']['id'])
 
     users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
-    for user in users_to_send:
-        bot.send_document(int(user['user_id']), document=document['file_id'])
+    document=document['file_id']
+    with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
+        list(Executor.map(lambda x: bot.send_document(*x), 
+                          [(int(user['username']), document) 
+                          for user in users_to_send]))
     logger.info('send_document_handler')
 
 
@@ -275,7 +195,8 @@ def inline_query_handler(bot, update):
         bot.answerInlineQuery(inline_query_id, [])
         return
 
-    query_result = table.scan(FilterExpression=Attr('first_name').contains(query.upper()) | Attr('last_name').contains(query.upper()))['Items']
+    query_result = table.scan(FilterExpression=Attr('first_name').contains(query.upper()) | 
+                                               Attr('last_name').contains(query.upper()))['Items']
     query_articles = list(map(lambda x: telegram.InlineQueryResultArticle(x['username'], 
                                                                           '%s %s' % (x['first_name'] or '', x['last_name'] or ''),
                                                                           telegram.InputTextMessageContent('%s %s' % (x['first_name'], x['last_name']))),
@@ -287,11 +208,6 @@ def inline_query_result_handler(bot, update):
     logger.info("QUERY RESULT UPDATE %s %s" % (str(update.chosen_inline_result.from_user.id), str(update.chosen_inline_result.result_id)))
     follow_user(str(update.chosen_inline_result.from_user.id), str(update.chosen_inline_result.result_id))
     logger.info('Query result handler')
-
-
-def echo(bot, update):
-    logger.info(update)
-    update.message.reply_text(update.message.text)
 
 
 def lambda_handler(event, context):
@@ -306,29 +222,19 @@ def lambda_handler(event, context):
 
 
 def main():
-    # Create the EventHandler and pass it your bot's token.
     updater = Updater(config.BOT_TOKEN)
 
     # Get the dispatcher to register handlers
     dp = updater.dispatcher
-
-    # on noncommand i.e message - echo the message on Telegram
-    # dp.add_handler(MessageHandler(None, dispatcher))
-
     register_handlers(dp)
-
-    # Start the Bot
     updater.start_polling()
 
-    # Run the bot until you press Ctrl-C or the process receives SIGINT,
-    # SIGTERM or SIGABRT. This should be used most of the time, since
-    # start_polling() is non-blocking and will stop the bot gracefully.
     updater.idle()
 
 
 def register_handlers(dp):
     dp.add_handler(CommandHandler('start', start_command_handler))
-    dp.add_handler(CommandHandler('add', add_command_handler))
+    # dp.add_handler(CommandHandler('add', add_command_handler))
     dp.add_handler(CommandHandler('send', send_command_handler))
     dp.add_handler(CommandHandler('remove', remove_command_handler))
     dp.add_handler(MessageHandler(Filters.contact, contact_handler))
