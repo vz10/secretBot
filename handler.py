@@ -113,7 +113,7 @@ def send_all_command_handler(bot, update):
     all_users = table.scan()['Items']
     message = update['message']['text'][len('/send_all'):]
 
-    with ThreadPoolExecutor(max_workers=min(len(all_users), 10)) as Executor:
+    with ThreadPoolExecutor(max_workers=min(len(all_users), config.MAX_THREADS)) as Executor:
         list(Executor.map(lambda x: bot.send_message(*x), 
                           [(int(user['username']), RESPONSES['important_message'].format(message)) 
                            for user in all_users]))
@@ -166,7 +166,7 @@ def send_command_handler(bot, update):
     if not users_to_send:
         return
 
-    with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
+    with ThreadPoolExecutor(max_workers=min(len(users_to_send), config.MAX_THREADS)) as Executor:
         list(Executor.map(lambda x: bot.send_message(*x), 
                           [(int(user['username']), RESPONSES['message_boilerplate'].format(message)) 
                            for user in users_to_send]))
@@ -186,7 +186,7 @@ def photo_handler(bot, update):
     if not users_to_send:
         return
     photo_to_send = photo[-1]['file_id']
-    with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
+    with ThreadPoolExecutor(max_workers=min(len(users_to_send), config.MAX_THREADS)) as Executor:
         list(Executor.map(lambda x: bot.send_photo(*x), 
                           [(int(user['username']), photo_to_send, RESPONSES['photo_caption']) 
                            for user in users_to_send]))
@@ -204,7 +204,7 @@ def document_handler(bot, update):
     users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
     if not users_to_send:
         return
-    with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
+    with ThreadPoolExecutor(max_workers=min(len(users_to_send), config.MAX_THREADS)) as Executor:
         list(Executor.map(lambda x: bot.send_document(*x), 
                           [(int(user['username']), document) 
                           for user in users_to_send]))
@@ -230,7 +230,7 @@ def sticker_handler(bot, update):
     if not users_to_send:
         return
     
-    with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
+    with ThreadPoolExecutor(max_workers=min(len(users_to_send), config.MAX_THREADS)) as Executor:
         list(Executor.map(send_message_and_sticker, 
                           [int(user['username']) for user in users_to_send]))
     logger.info('send_sticker_handler')
@@ -290,12 +290,8 @@ def main():
 
 
 def register_handlers(dp):
-    dp.add_handler(CommandHandler('start', start_command_handler))
-    # dp.add_handler(CommandHandler('add', add_command_handler))
-    dp.add_handler(CommandHandler('send', send_command_handler))
-    dp.add_handler(CommandHandler('send_all', send_all_command_handler))
-    dp.add_handler(CommandHandler('remove', remove_command_handler))
-    dp.add_handler(CommandHandler('update', update_command_handler))
+    for command in COMMANDS:
+        dp.add_handler(CommandHandler(command, globals()[f'{command}_command_handler']))
     dp.add_handler(MessageHandler(Filters.contact, contact_handler))
     dp.add_handler(MessageHandler(Filters.photo, photo_handler))
     dp.add_handler(MessageHandler(Filters.document, document_handler))
