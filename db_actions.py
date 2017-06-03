@@ -61,6 +61,22 @@ def create_user(update, table):
             }
         )
 
+
+def update_user(update, table):
+    username = str(update['message']['chat']['id'])
+    followers = table.scan(
+        FilterExpression=Attr('follow').contains(update['message']['chat']['username'])  
+    )
+    item = table.get_item(Key={'username': username})['Item']
+    print(item)
+    item['first_name'] = update.message.from_user.first_name.upper()
+    item['last_name'] = update.message.from_user.last_name.upper()
+    item['follow_count'] = len(item['follow'])
+    item['followers'] = [x['username'] for x in followers['Items']]
+    item['photo_id'] = item.get('photo_id', 0)
+    table.put_item(Item=item)
+
+
 def update_user_photo(photo, username, table):
     table.update_item(
             Key={

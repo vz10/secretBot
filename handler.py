@@ -13,7 +13,8 @@ from boto3.dynamodb.conditions import Key, Attr
 
 import config
 from consts import RESPONSES, COMMANDS
-from db_actions import update_users_followers, follow_user, create_user, update_user_photo
+from db_actions import (update_users_followers, follow_user, 
+                        create_user, update_user_photo, update_user)
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -21,11 +22,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Create a connection to the database
-dynamodb = boto3.resource('dynamodb', region_name=config.DB_REGION)
-# dynamodb = boto3.resource('dynamodb', endpoint_url=config.DB_HOST)
-
-table = dynamodb.Table(config.DB_NAME)
-
+table = None
 
 def message_handler(bot, update):
     '''
@@ -56,8 +53,6 @@ def start_command_handler(bot, update):
 
     # Avoid duplication of the existing users
     username = str(update['message']['chat']['id'])
-    # if table.get_item(Key={'username': username}).get('Item', False):
-    #     return 
     create_user(update, table)
 
     photo = bot.getUserProfilePhotos(update.message.from_user.id)['photos'][0]
@@ -95,6 +90,33 @@ def start_command_handler(bot, update):
 #     # update_user_real_follow_count(username)
 
 #     logger.info('add_command_handler')
+
+
+def update_command_handler(bot, update):
+    '''
+    Handler for the "update" commands
+    Update user info in database
+    '''
+    username = str(update['message']['chat']['id'])
+    update_user(update, table)
+
+    photo = bot.getUserProfilePhotos(update.message.from_user.id)['photos'][0]
+    update_user_photo(photo, username, table)
+
+    logger.info('remove_command_handler')
+
+
+def send_all_command_handler(bot, update):
+    username = str(update['message']['chat']['id'])
+    if not username == config.MAIN_USER:
+        return
+    all_users = table.scan()['Items']
+    message = update['message']['text'][len('/send_all'):]
+
+    with ThreadPoolExecutor(max_workers=min(len(all_users), 10)) as Executor:
+        list(Executor.map(lambda x: bot.send_message(*x), 
+                          [(int(user['username']), RESPONSES['important_message'].format(message)) 
+                           for user in all_users]))
 
 
 def remove_command_handler(bot, update):
@@ -140,12 +162,13 @@ def send_command_handler(bot, update):
         return 
 
     username = str(update['message']['chat']['id'])
-
     users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
-    message_to_send = f'Somebody told me, that "{message}"'
+    if not users_to_send:
+        return
+
     with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
         list(Executor.map(lambda x: bot.send_message(*x), 
-                          [(int(user['username']), message_to_send) 
+                          [(int(user['username']), RESPONSES['message_boilerplate'].format(message)) 
                            for user in users_to_send]))
     # for user in users_to_send:
         # bot.send_message(int(user['username']), f'Somebody told me, that "{message}"')
@@ -159,32 +182,58 @@ def photo_handler(bot, update):
     '''
     photo = update['message']['photo']
     username = str(update['message']['chat']['id'])
-
     users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
+    if not users_to_send:
+        return
     photo_to_send = photo[-1]['file_id']
-    caption='Somebody has just shown me that'
     with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
         list(Executor.map(lambda x: bot.send_photo(*x), 
-                          [(int(user['username']), photo_to_send, caption) 
+                          [(int(user['username']), photo_to_send, RESPONSES['photo_caption']) 
                            for user in users_to_send]))
     logger.info('send_photo_handler')
 
 
 def document_handler(bot, update):
     '''
-    Handler for the docume t messages
+    Handler for the document messages
     Send message with photo to all the followers who has more that 10 real_following
     '''
-    document = update['message']['document']
+    document = update['message']['document']['file_id']
     username = str(update['message']['chat']['id'])
 
     users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
-    document=document['file_id']
+    if not users_to_send:
+        return
     with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
         list(Executor.map(lambda x: bot.send_document(*x), 
                           [(int(user['username']), document) 
                           for user in users_to_send]))
     logger.info('send_document_handler')
+
+
+def sticker_handler(bot, update):
+    '''
+    Handler for the sticker messages
+    Send message with sticker to all the followers who has more that 10 real_following
+    '''
+    def send_message_and_sticker(chat_id):
+        '''
+        Just a little handler to be sure that sticker will be send
+        after the message
+        '''
+        bot.send_message(chat_id, RESPONSES['before_sticker_send'])
+        bot.send_sticker(chat_id, sticker)
+
+    username = str(update['message']['chat']['id'])
+    sticker = update['message']['sticker']['file_id']
+    users_to_send = table.scan(FilterExpression=Attr('follow').contains(username))['Items']
+    if not users_to_send:
+        return
+    
+    with ThreadPoolExecutor(max_workers=min(len(users_to_send), 10)) as Executor:
+        list(Executor.map(send_message_and_sticker, 
+                          [int(user['username']) for user in users_to_send]))
+    logger.info('send_sticker_handler')
 
 
 def inline_query_handler(bot, update):
@@ -206,11 +255,16 @@ def inline_query_handler(bot, update):
 
 def inline_query_result_handler(bot, update):
     logger.info("QUERY RESULT UPDATE %s %s" % (str(update.chosen_inline_result.from_user.id), str(update.chosen_inline_result.result_id)))
-    follow_user(str(update.chosen_inline_result.from_user.id), str(update.chosen_inline_result.result_id))
+    follow_user(str(update.chosen_inline_result.from_user.id), 
+                str(update.chosen_inline_result.result_id), 
+                table)
     logger.info('Query result handler')
 
 
 def lambda_handler(event, context):
+    dynamodb = boto3.resource('dynamodb', region_name=config.DB_REGION)
+    globals()['table'] = dynamodb.Table(config.DB_NAME)
+
     logger.info(f'HANDLER UPDATE {event} {context}')
     updater = Updater(config.BOT_TOKEN)
     bot = telegram.Bot(config.BOT_TOKEN)
@@ -222,7 +276,10 @@ def lambda_handler(event, context):
 
 
 def main():
-    updater = Updater(config.BOT_TOKEN)
+    dynamodb = boto3.resource('dynamodb', endpoint_url=config.DB_HOST)
+    globals()['table'] = dynamodb.Table(config.DB_NAME)
+
+    updater = Updater(config.TEST_BOT_TOKEN)
 
     # Get the dispatcher to register handlers
     dp = updater.dispatcher
@@ -236,10 +293,13 @@ def register_handlers(dp):
     dp.add_handler(CommandHandler('start', start_command_handler))
     # dp.add_handler(CommandHandler('add', add_command_handler))
     dp.add_handler(CommandHandler('send', send_command_handler))
+    dp.add_handler(CommandHandler('send_all', send_all_command_handler))
     dp.add_handler(CommandHandler('remove', remove_command_handler))
+    dp.add_handler(CommandHandler('update', update_command_handler))
     dp.add_handler(MessageHandler(Filters.contact, contact_handler))
     dp.add_handler(MessageHandler(Filters.photo, photo_handler))
     dp.add_handler(MessageHandler(Filters.document, document_handler))
+    dp.add_handler(MessageHandler(Filters.sticker, sticker_handler))
     dp.add_handler(InlineQueryHandler(inline_query_handler))
     dp.add_handler(ChosenInlineResultHandler(inline_query_result_handler))
 
