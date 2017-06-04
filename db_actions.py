@@ -1,34 +1,29 @@
 from boto3.dynamodb.conditions import Attr
 
-def update_users_followers(username, following, table, remove=False):
+def update_users_followers(username, follower_id, table, remove=False):
     '''
     Find all the users that %username% follows and 
     update their "followers" list and "followers_count" amount
     '''
 
-    for user in following:
-        item = table.get_item(Key={'username': user}).get('Item', False)
-        if item:
-            try: 
-                item['followers'].remove(username) if remove else item['followers'].append(username)
-            except ValueError:
-                continue
-        else:
-            continue 
-        table.update_item(
-            Key={
-                'username': user
-            },
-            UpdateExpression='SET followers = :val1',
-            ExpressionAttributeValues={
-                ':val1': item['followers'],
-            },
-        )
+    item = table.get_item(Key={'username': username}).get('Item', False)
+    item['followers'].remove(follower_id) if remove else item['followers'].append(follower_id)
+    table.update_item(
+        Key={
+            'username': username
+        },
+        UpdateExpression='SET followers = :val1',
+        ExpressionAttributeValues={
+            ':val1': item['followers'],
+        },
+    )
 
 
 def follow_user(username, user_id, table):
     item = table.get_item(Key={'username': username})['Item']
-    new_follow = set([user_id]) - set(item['follow']) - set([username]) 
+    new_follow = set([user_id]) - set(item['follow']) - set([username])
+    if not new_follow:
+        return False
     new_item = table.update_item(
         Key={
             'username': username
@@ -40,8 +35,31 @@ def follow_user(username, user_id, table):
         },
         ReturnValues="UPDATED_NEW"
     )
-    update_users_followers(username, set(new_follow), table, remove=False)
+    update_users_followers(user_id, username, table, remove=False)
+    return True
     # update_user_real_follow_count(username)
+
+
+def get_followers_list(username, table):
+    user_following = table.get_item(Key={'username': username})['Item']['follow']
+    return table.scan(
+        FilterExpression=Attr('username').is_in(user_following)  
+    )['Items']
+
+
+def unfollow_user(username, user_id, table):
+    item = table.get_item(Key={'username': username})['Item']
+    item['follow'].remove(user_id)
+    table.update_item(
+        Key={
+            'username': username
+        },
+        UpdateExpression='SET follow = :val1',
+        ExpressionAttributeValues={
+            ':val1': item['follow'],
+        }
+    )
+    update_users_followers(user_id, username, table, remove=True)
 
 
 def create_user(update, table):
@@ -68,7 +86,6 @@ def update_user(update, table):
         FilterExpression=Attr('follow').contains(update['message']['chat']['username'])  
     )
     item = table.get_item(Key={'username': username})['Item']
-    print(item)
     item['first_name'] = update.message.from_user.first_name.upper()
     item['last_name'] = update.message.from_user.last_name.upper()
     item['follow_count'] = len(item['follow'])

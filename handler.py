@@ -5,7 +5,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import telegram
-from telegram.ext import Updater, MessageHandler, CommandHandler, Filters
+from telegram.ext import Updater, MessageHandler, CommandHandler, Filters, CallbackQueryHandler
 from telegram.ext.inlinequeryhandler import InlineQueryHandler
 from telegram.ext.choseninlineresulthandler import ChosenInlineResultHandler
 import boto3
@@ -13,8 +13,8 @@ from boto3.dynamodb.conditions import Key, Attr
 
 import config
 from consts import RESPONSES, COMMANDS
-from db_actions import (update_users_followers, follow_user, 
-                        create_user, update_user_photo, update_user)
+from db_actions import (update_users_followers, follow_user, unfollow_user,
+                        create_user, update_user_photo, update_user, get_followers_list)
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -38,12 +38,15 @@ def contact_handler(bot, update):
     Handler for the messages with contacts
     '''
     username = str(update['message']['chat']['id'])
+    user_to_follow = str(update['message']['contact']['user_id'])
     if  not update['message']['contact']['user_id']:
         bot.send_message(username, RESPONSES['empty_contact'])
         return
     
-    follow_user(username, str(update['message']['contact']['user_id']))
-
+    new_follower = follow_user(username, user_to_follow, table)
+    if new_follower:
+        bot.send_message(user_to_follow, RESPONSES['new_follower'])
+    logger.info('contat_handler')
 
 def start_command_handler(bot, update):
     '''
@@ -59,37 +62,6 @@ def start_command_handler(bot, update):
     update_user_photo(photo, username, table)
 
     logger.info('start_command_handler')
-
-
-# def add_command_handler(bot, update):
-#     '''
-#     Handler for the "add" commands
-#     Add new user(s) to the current user following list
-#     '''
-#     users = list(map(lambda x: x[1:] if x.startswith('@') else x, 
-#                      update['message']['text'][len('/add'):].split()))
-#     chat_id = update['message']['chat']['id']
-#     username = str(update['message']['chat']['id'])
-#     if not users:
-#         bot.send_message(chat_id, RESPONSES['empty_add_command'])
-#         return
-
-#     item = table.get_item(Key={'username': username})['Item']
-#     new_follow = set(users) - set(item['follow']) - set([username]) 
-#     new_item = table.update_item(
-#         Key={
-#             'username': username
-#         },
-#         UpdateExpression='SET follow = list_append(follow, :val1)',
-#         ExpressionAttributeValues={
-#             ':val1': list(new_follow),
-#         },
-#         ReturnValues="UPDATED_NEW"
-#     )
-#     update_users_followers(username, set(new_follow), remove=False)
-#     # update_user_real_follow_count(username)
-
-#     logger.info('add_command_handler')
 
 
 def update_command_handler(bot, update):
@@ -124,30 +96,34 @@ def remove_command_handler(bot, update):
     Handler for the "remove" commands
     Remove user(s) from the current user following list
     '''
-    users = list(map(lambda x: x[1:] if x.startswith('@') else x, 
-                     update['message']['text'][len('/remove'):].split()))
     chat_id = update['message']['chat']['id']
     username = str(update['message']['chat']['id'])
+    users = get_followers_list(username, table)
     if not users:
         bot.send_message(chat_id, RESPONSES['empty_remove_command'])
         return
-
-    item = table.get_item(Key={'username': username})['Item']
-    new_follow = set(item['follow']) - set(users)
-    table.update_item(
-        Key={
-            'username': username
-        },
-        UpdateExpression='SET follow = :val1',
-        ExpressionAttributeValues={
-            ':val1': list(new_follow),
-        }
-    )
-
-    update_users_followers(username, set(users), table, remove=True)
-    # update_user_real_follow_count(username, follow=new_follow)
+    logger.info(users)
+    buttons = [telegram.InlineKeyboardButton(text='%s %s' % (user.get('first_name', ''), user.get('last_name', '')),
+                                             callback_data=str(user['username'])) for user in users]
+    reply_markup = telegram.InlineKeyboardMarkup([[button] for button in buttons])
+    bot.sendMessage(chat_id=chat_id,
+                    text=RESPONSES['remove_keyboard_message'],
+                    reply_markup=reply_markup)
 
     logger.info('remove_command_handler')
+
+
+def remove_user_callback(bot, update):
+    '''
+    Handler callback from custom keyboard for the "remove" commands
+    Remove user from the current user following list
+    '''
+    logger.info('='*80)
+    username = str(update['callback_query']['message']['chat']['id'])
+    unfollower_id = str(update['callback_query']['data'])
+    logger.info("remove users %s %s" % (username, unfollower_id))
+    # update_user_real_follow_count(username, follow=new_follow)
+    unfollow_user(username, unfollower_id, table)
 
 
 def send_command_handler(bot, update):
@@ -254,10 +230,11 @@ def inline_query_handler(bot, update):
 
 
 def inline_query_result_handler(bot, update):
-    logger.info("QUERY RESULT UPDATE %s %s" % (str(update.chosen_inline_result.from_user.id), str(update.chosen_inline_result.result_id)))
-    follow_user(str(update.chosen_inline_result.from_user.id), 
-                str(update.chosen_inline_result.result_id), 
-                table)
+    username = str(update.chosen_inline_result.from_user.id)
+    user_to_follow = str(update.chosen_inline_result.result_id)
+    new_follower = follow_user(username, user_to_follow, table)
+    if new_follower:
+        bot.send_message(user_to_follow, RESPONSES['new_follower'])
     logger.info('Query result handler')
 
 
@@ -298,6 +275,7 @@ def register_handlers(dp):
     dp.add_handler(MessageHandler(Filters.sticker, sticker_handler))
     dp.add_handler(InlineQueryHandler(inline_query_handler))
     dp.add_handler(ChosenInlineResultHandler(inline_query_result_handler))
+    dp.add_handler(CallbackQueryHandler(remove_user_callback))
 
 
 if __name__ == '__main__':
