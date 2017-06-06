@@ -75,7 +75,7 @@ def update_command_handler(bot, update):
     photo = bot.getUserProfilePhotos(update.message.from_user.id)['photos'][0]
     update_user_photo(photo, username, table)
 
-    logger.info('remove_command_handler')
+    logger.info('update_command_handler')
 
 
 def send_all_command_handler(bot, update):

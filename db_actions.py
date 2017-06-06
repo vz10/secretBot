@@ -65,13 +65,13 @@ def unfollow_user(username, user_id, table):
 def create_user(update, table):
     username = str(update['message']['chat']['id'])
     followers = table.scan(
-        FilterExpression=Attr('follow').contains(update['message']['chat']['username'])  
+        FilterExpression=Attr('follow').contains(username)  
     )
     table.put_item(
         Item={
                 'username': username,
-                'first_name':  update.message.from_user.first_name.upper(),
-                'last_name':  update.message.from_user.last_name.upper(),
+                'first_name': update.message.from_user.first_name.upper(),
+                'last_name': update.message.from_user.last_name.upper() if update.message.from_user.last_name else None,
                 'follow': [],
                 'follow_count': 0,
                 'followers': [x['username'] for x in followers['Items']],
@@ -83,11 +83,12 @@ def create_user(update, table):
 def update_user(update, table):
     username = str(update['message']['chat']['id'])
     followers = table.scan(
-        FilterExpression=Attr('follow').contains(update['message']['chat']['username'])  
+        FilterExpression=Attr('follow').contains(username)  
     )
     item = table.get_item(Key={'username': username})['Item']
     item['first_name'] = update.message.from_user.first_name.upper()
-    item['last_name'] = update.message.from_user.last_name.upper()
+    if update.message.from_user.last_name:
+        item['last_name'] = update.message.from_user.last_name.upper()
     item['follow_count'] = len(item['follow'])
     item['followers'] = [x['username'] for x in followers['Items']]
     item['photo_id'] = item.get('photo_id', 0)
